@@ -26,6 +26,15 @@
 
 别做成作业拓扑编排换皮；别做成纯水位大盘
 
+## 拒绝副作用口径（钉死，乙写法，当日禁止再换）
+
+- 拒绝只追加 `releases` 拒绝流水与原因；`slices.completeness` 与 `release_status` 保持拒绝前原值，**禁止拒绝后改成“待检”，拒绝路径禁止写 `watermarks` 推进水位**
+- 乙写法快照列 `reject_completeness_snapshot` / `reject_release_status_snapshot` / `last_reject_reason` / `last_reject_at` 只供切片详情只读留证
+- `rejection_ledger` 为拒绝副作用簿，事件分 `拒绝` / `拒绝争用` / `拒绝口径偏了`，与拒绝流水同库（SQLite `data/app.db`）逐笔可核
+- `rejection_policy` 按日落锁当日口径；代码常量 `REJECTION_POLICY=乙` 与库内锁冲突时拒绝请求并记“拒绝口径偏了”，不沿用偏离口径
+- 同一切片拒绝经进程内切片锁 + `BEGIN IMMEDIATE` 互斥串行；2 秒窗口内后手一律记“拒绝争用”并返回 409，不静默通过、不重复落拒绝流水
+- 只读核查接口：`GET /api/rejection-ledger`、`GET /api/rejection-policy`、`GET /api/slices/{id}`
+
 ## 互斥切口候选
 
 - 迟到切片整批拒收 vs 进待补齐冻结区

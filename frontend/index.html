@@ -33,6 +33,22 @@
   .err{color:var(--bad);min-height:18px;font-size:13px}
   .kpi{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px}
   .kpi .panel{padding:12px}.kpi b{display:block;font-size:22px;margin-top:4px}
+  .policybar{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:10px;border:1px solid var(--line);background:#13233b;margin-bottom:14px;font-size:13px}
+  .policybar .pill{padding:2px 10px;border-radius:999px;background:#173a2c;color:var(--ok);font-weight:700}
+  .policybar.drift{background:#3a1719;border-color:#5b2326}
+  .policybar.drift .pill{background:#4a1d20;color:var(--bad)}
+  .policybar span.muted{color:var(--muted)}
+  .modal-mask{position:fixed;inset:0;background:rgba(3,7,15,.72);display:flex;align-items:center;justify-content:center;z-index:20}
+  .modal{width:min(720px,92vw);max-height:86vh;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px}
+  .modal h3{margin:0 0 10px;font-size:16px}
+  .kv{display:grid;grid-template-columns:120px 1fr;gap:6px 10px;font-size:13px;margin-bottom:12px}
+  .kv .k{color:var(--muted)}
+  .ro{border:1px dashed #3a4a6b;background:#0d1526;border-radius:8px;padding:8px 10px;font-size:12px;color:var(--muted);margin-bottom:12px}
+  .ev{font-size:12px;padding:3px 8px;border-radius:999px;background:#2a1518;color:var(--bad)}
+  .ev.ok{background:#173a2c;color:var(--ok)}
+  .ev.warn{background:#3a3017;color:#ffd166}
+  .linkbtn{background:none;border:0;color:var(--accent);cursor:pointer;padding:0;font-size:13px}
+  .reason-input{margin-bottom:8px}
 </style>
 </head>
 <body>
@@ -56,9 +72,11 @@ createApp({
     const user=ref(localStorage.getItem('slicegate_user')||'');
     const username=ref('admin'), password=ref('123456'), err=ref(''), tab=ref(0), actionErr=ref('');
     const slices=ref([]), releases=ref([]), watermarks=ref([]);
+    const ledger=ref([]), policyInfo=ref({code_policy:'乙',locked:null,drift:false});
+    const detail=ref(null);
     const form=ref({slice_no:'SL-2026-11-03-east',biz_date:'2026-11-03',partition_key:'east',row_count:1000,expected_count:1000});
-    const releaseSliceId=ref(1), consumer=ref('ads_order');
-    const nav=['切片登记','完整度裁决','下游放行','消费水位'];
+    const releaseSliceId=ref(1), consumer=ref('ads_order'), rejectReason=ref('完整度未达标');
+    const nav=['切片登记','完整度裁决','下游放行','拒绝副作用','消费水位'];
     const completeCnt=computed(()=>slices.value.filter(s=>s.completeness==='完整').length);
     const openCnt=computed(()=>slices.value.filter(s=>s.release_status!=='已放行').length);
     function auth(){return {Authorization:'Bearer '+token.value,'Content-Type':'application/json'};}
@@ -85,13 +103,28 @@ createApp({
       releases.value=Array.isArray(rel.items)?rel.items:[];
       const w=await loadJson('/api/watermarks'); if(w===null) return;
       watermarks.value=Array.isArray(w.items)?w.items:[];
+      const lg=await loadJson('/api/rejection-ledger'); if(lg===null) return;
+      ledger.value=Array.isArray(lg.items)?lg.items:[];
+      const pol=await loadJson('/api/rejection-policy'); if(pol===null) return;
+      policyInfo.value=pol;
       if(slices.value.length) releaseSliceId.value=slices.value[0].id;
     }
     async function createSlice(){actionErr.value='';const r=await fetch('/api/slices',{method:'POST',headers:auth(),body:JSON.stringify(form.value)});const j=await r.json();if(!r.ok)actionErr.value=j.detail||'失败';await refresh();}
     async function evaluate(id){await fetch('/api/slices/'+id+'/evaluate',{method:'POST',headers:auth()});await refresh();}
-    async function doRelease(){actionErr.value='';const r=await fetch('/api/slices/'+releaseSliceId.value+'/release',{method:'POST',headers:auth(),body:JSON.stringify({consumer:consumer.value})});const j=await r.json();if(!r.ok)actionErr.value=j.detail||'放行失败';await refresh();}
+    async function doRelease(){
+      actionErr.value='';
+      const r=await fetch('/api/slices/'+releaseSliceId.value+'/release',{method:'POST',headers:auth(),body:JSON.stringify({consumer:consumer.value,reason:rejectReason.value})});
+      const j=await r.json();
+      if(!r.ok){actionErr.value=j.detail||'放行失败';}
+      await refresh();
+    }
+    async function showDetail(id){
+      const j=await loadJson('/api/slices/'+id);
+      if(j!==null) detail.value=j;
+    }
+    function closeDetail(){detail.value=null;}
     onMounted(()=>{if(token.value)refresh();});
-    return {token,user,username,password,err,tab,nav,slices,releases,watermarks,form,releaseSliceId,consumer,actionErr,completeCnt,openCnt,login,logout,createSlice,evaluate,doRelease};
+    return {token,user,username,password,err,tab,nav,slices,releases,watermarks,form,releaseSliceId,consumer,rejectReason,actionErr,completeCnt,openCnt,login,logout,createSlice,evaluate,doRelease,ledger,policyInfo,detail,showDetail,closeDetail};
   },
   template:`
   <div v-if="!token" class="login">
@@ -106,6 +139,16 @@ createApp({
       <div class="user">{{user}}</div><button class="ghost" @click="logout">退出</button>
     </div>
     <main>
+      <div class="policybar" :class="{drift:policyInfo.drift}">
+        <span class="pill">拒绝口径 {{policyInfo.code_policy}} 写法 · 已钉死</span>
+        <span class="muted">拒绝只追加拒绝流水与原因，完整度/未放行态保持拒绝前快照，拒绝路径不推进水位</span>
+        <span style="flex:1"></span>
+        <template v-if="policyInfo.locked">
+          <span class="muted">当日口径锁：{{policyInfo.locked.biz_date}} / {{policyInfo.locked.policy}} / {{policyInfo.locked.locked_by}}</span>
+        </template>
+        <span v-else class="muted">当日口径锁：首次拒绝落锁，当日禁止再换</span>
+        <span v-if="policyInfo.drift" class="ev">拒绝口径偏了</span>
+      </div>
       <div class="kpi">
         <div class="panel">切片总数<b class="mono">{{slices.length}}</b></div>
         <div class="panel">已完整<b class="mono">{{completeCnt}}</b></div>
@@ -114,11 +157,12 @@ createApp({
       <div v-show="tab===0" class="grid">
         <div class="panel">
           <h2>在途切片</h2>
-          <table><thead><tr><th>切片号</th><th>日/区</th><th>实收</th><th>完整度</th><th></th></tr></thead>
+          <table><thead><tr><th>切片号</th><th>日/区</th><th>实收</th><th>完整度</th><th>放行态</th><th></th></tr></thead>
           <tbody><tr v-for="s in slices" :key="s.id">
-            <td class="mono">{{s.slice_no}}</td><td>{{s.biz_date}} / {{s.partition_key}}</td>
+            <td class="mono"><button class="linkbtn" @click="showDetail(s.id)">{{s.slice_no}}</button></td><td>{{s.biz_date}} / {{s.partition_key}}</td>
             <td class="mono">{{s.row_count}}/{{s.expected_count}}</td>
             <td><span class="tag" :class="{bad:s.completeness!=='完整'}">{{s.completeness}}</span></td>
+            <td>{{s.release_status}}<span v-if="s.last_reject_reason" class="muted" style="font-size:11px"> · 最近拒绝：{{s.last_reject_reason}}</span></td>
             <td><button class="ghost" @click="evaluate(s.id)">重裁</button></td>
           </tr></tbody></table>
         </div>
@@ -142,21 +186,70 @@ createApp({
       <div v-show="tab===2" class="grid">
         <div class="panel">
           <h2>申请放行</h2>
-          <label>切片</label><select v-model.number="releaseSliceId"><option v-for="s in slices" :value="s.id">{{s.slice_no}}（{{s.completeness}}）</option></select>
+          <label>切片</label><select v-model.number="releaseSliceId"><option v-for="s in slices" :value="s.id">{{s.slice_no}}（{{s.completeness}} / {{s.release_status}}）</option></select>
           <label>下游</label><input v-model="consumer"/>
+          <label>拒绝原因（不完整被拒时写入拒绝流水，完整度字段不动）</label>
+          <input class="reason-input" v-model="rejectReason" placeholder="完整度未达标"/>
           <button class="primary" @click="doRelease">放行</button>
           <div class="err">{{actionErr}}</div>
+          <div class="ro">口径：拒绝仅追加“拒绝”流水与副作用簿，并在切片上留拒绝快照与最近拒绝原因（只读）；完整度与未放行态保持拒绝前原值，不写水位。</div>
         </div>
         <div class="panel">
-          <h2>放行流水</h2>
-          <table><thead><tr><th>切片</th><th>下游</th><th>结果</th><th>时间</th></tr></thead>
-          <tbody><tr v-for="r in releases" :key="r.id"><td class="mono">{{r.slice_no}}</td><td>{{r.consumer}}</td><td>{{r.status}}</td><td class="mono">{{r.created_at}}</td></tr></tbody></table>
+          <h2>放行流水（含拒绝）</h2>
+          <table><thead><tr><th>切片</th><th>下游</th><th>结果</th><th>原因/备注</th><th>时间</th></tr></thead>
+          <tbody><tr v-for="r in releases" :key="r.id"><td class="mono">{{r.slice_no}}</td><td>{{r.consumer}}</td><td><span class="ev" :class="{ok:r.status==='成功'}">{{r.status}}</span></td><td>{{r.note}}</td><td class="mono">{{r.created_at}}</td></tr></tbody></table>
         </div>
       </div>
       <div v-show="tab===3" class="panel">
+        <h2>拒绝副作用簿（拒绝 / 拒绝争用 / 拒绝口径偏了）</h2>
+        <table><thead><tr><th>时间</th><th>切片</th><th>下游</th><th>事件</th><th>口径</th><th>原因</th><th>拒绝前完整度快照</th><th>拒绝前放行态快照</th><th>操作人</th></tr></thead>
+          <tbody><tr v-for="g in ledger" :key="g.id">
+            <td class="mono">{{g.created_at}}</td><td class="mono"><button class="linkbtn" @click="showDetail(g.slice_id)">{{g.slice_no}}</button></td><td>{{g.consumer}}</td>
+            <td><span class="ev" :class="{ok:g.event_type==='拒绝',warn:g.event_type==='拒绝争用'}">{{g.event_type}}</span></td>
+            <td>{{g.policy}}</td><td>{{g.reason}}</td>
+            <td><span class="tag" :class="{bad:g.completeness_snapshot!=='完整'}">{{g.completeness_snapshot}}</span></td>
+            <td>{{g.release_status_snapshot}}</td><td>{{g.operator}}</td>
+          </tr>
+          <tr v-if="!ledger.length"><td colspan="9" class="muted" style="text-align:center;padding:16px">暂无拒绝副作用</td></tr></tbody>
+        </table>
+      </div>
+      <div v-show="tab===4" class="panel">
         <h2>消费水位</h2>
         <table><thead><tr><th>消费方</th><th>业务日</th><th>水位</th><th>来源切片</th></tr></thead>
         <tbody><tr v-for="w in watermarks" :key="w.id"><td>{{w.consumer}}</td><td>{{w.biz_date}}</td><td class="mono">{{w.watermark}}</td><td class="mono">{{w.source_slice}}</td></tr></tbody></table>
+      </div>
+      <div v-if="detail" class="modal-mask" @click.self="closeDetail">
+        <div class="modal">
+          <h3>切片详情 <span class="mono" style="color:var(--accent)">{{detail.slice_no}}</span>
+            <button class="ghost" style="float:right" @click="closeDetail">关闭</button></h3>
+          <div class="kv">
+            <span class="k">业务日/分区</span><span>{{detail.biz_date}} / {{detail.partition_key}}</span>
+            <span class="k">实收/期望</span><span class="mono">{{detail.row_count}} / {{detail.expected_count}}</span>
+            <span class="k">完整度（主字段）</span><span><span class="tag" :class="{bad:detail.completeness!=='完整'}">{{detail.completeness_readonly}}</span></span>
+            <span class="k">放行态</span><span>{{detail.release_status}}</span>
+            <span class="k">最近拒绝原因</span><span>{{detail.last_reject_reason||'—'}} <span class="muted mono">{{detail.last_reject_at||''}}</span></span>
+          </div>
+          <div class="ro">
+            拒绝快照（乙写法，只读留证）：完整度快照 <b>{{detail.reject_completeness_snapshot||'—'}}</b>
+            ｜ 放行态快照 <b>{{detail.reject_release_status_snapshot||'—'}}</b><br/>
+            拒绝不改写完整度主字段；若主字段与快照不一致即数据被越权改写。
+          </div>
+          <h3 style="font-size:14px">拒绝流水</h3>
+          <table><thead><tr><th>下游</th><th>结果</th><th>原因</th><th>时间</th></tr></thead>
+            <tbody><tr v-for="r in detail.releases" :key="r.id"><td>{{r.consumer}}</td><td><span class="ev" :class="{ok:r.status==='成功'}">{{r.status}}</span></td><td>{{r.note}}</td><td class="mono">{{r.created_at}}</td></tr>
+            <tr v-if="!detail.releases.length"><td colspan="4" class="muted" style="text-align:center;padding:10px">无流水</td></tr></tbody>
+          </table>
+          <h3 style="font-size:14px;margin-top:12px">拒绝副作用</h3>
+          <table><thead><tr><th>事件</th><th>口径</th><th>原因</th><th>快照</th><th>操作人</th><th>时间</th></tr></thead>
+            <tbody><tr v-for="g in detail.rejection_ledger" :key="g.id">
+              <td><span class="ev" :class="{ok:g.event_type==='拒绝',warn:g.event_type==='拒绝争用'}">{{g.event_type}}</span></td>
+              <td>{{g.policy}}</td><td>{{g.reason}}</td>
+              <td>{{g.completeness_snapshot}} / {{g.release_status_snapshot}}</td>
+              <td>{{g.operator}}</td><td class="mono">{{g.created_at}}</td>
+            </tr>
+            <tr v-if="!detail.rejection_ledger.length"><td colspan="6" class="muted" style="text-align:center;padding:10px">无拒绝副作用</td></tr></tbody>
+          </table>
+        </div>
       </div>
     </main>
   </div>`
